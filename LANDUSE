@@ -1,0 +1,134 @@
+Imports (1 entry)
+var DRC: polygon, 4 vertices 
+var batch = require('users/fitoprincipe/geetools:batch');
+
+// Load Landsat 5 and 8 and calculate NDVI
+var calculateNDVI = function(image) {
+  // Select near-infrared (NIR) and red bands
+  var nir = image.select('SR_B5'); // NIR for Landsat 8
+  var red = image.select('SR_B4'); // Red for Landsat 8
+  // Calculate NDVI using the normalized difference formula
+  var ndvi = nir.subtract(red).divide(nir.add(red)).rename('NDVI');
+  // Optionally scale NDVI values between -1 and 1
+  ndvi = ndvi.multiply(0.5).add(0.5);
+  // Adjust scaling if needed
+  return image.addBands(ndvi).clip(DRC);
+};
+
+// Load the shapefile from assets
+var polygons = ee.FeatureCollection('projects/ee-donyaotarod/assets/Mutanda');
+
+// Display the polygons on the map
+Map.centerObject(polygons, 10);
+Map.addLayer(polygons, {color: 'red'}, 'Polygons');
+
+// Define the time range
+var startDate = ee.Date.fromYMD(2000, 1, 1);
+var endDate = ee.Date.fromYMD(2023, 12, 31);
+var n_months = endDate.difference(startDate, 'month').round();
+var num_months_in_interval = 12;
+var years = ee.List.sequence(0, n_months, num_months_in_interval);
+
+var make_datelist = function(n) {
+  return startDate.advance(n, 'month');
+};
+
+years = years.map(make_datelist);
+print(years);
+
+// Harmonization coefficients for Landsat 8 to match Landsat 5
+var harmonizeL8 = function(image) {
+  return image
+    .select(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5'], ['Blue', 'Green', 'Red', 'NIR'])
+    .multiply([0.919, 0.931, 0.937, 0.833])
+    .add([0.004, 0.003, 0.004, 0.005])
+    .rename(['Blue', 'Green', 'Red', 'NIR']);
+};
+
+// Harmonization for Landsat 5 (kept unchanged as reference)
+var harmonizeL5 = function(image) {
+  return image
+    .select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4'], ['Blue', 'Green', 'Red', 'NIR']);
+};
+
+// Function to create yearly composites for Landsat 5 and 8 combined
+var createYearlyComposite = function(year) {
+  startDate = ee.Date(year).advance(4, 'month');
+  endDate = ee.Date(startDate).advance(10, 'month');
+
+  var landsat5 = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2")
+    .filterDate(startDate, endDate)
+    .filterBounds(DRC)
+    .map(harmonizeL5);
+
+  var landsat8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+    .filterDate(startDate, endDate)
+    .filterBounds(DRC)
+    .map(harmonizeL8);
+
+  // Combine the collections
+  var combined = landsat5.merge(landsat8)
+    .median(); // Use median for cloud-free composite
+
+  return ee.Image(combined);
+};
+
+
+var yearlyComposite = ee.ImageCollection.fromImages(years.map(createYearlyComposite));
+
+print(yearlyComposite);
+print('Collection to bands');
+
+var Visprams = {
+  bands: ['Red', 'Green', 'Blue'],
+  min: 0,
+  max: 30000
+};
+
+// Visualize the first image in the collection
+Map.centerObject(DRC, 6);
+Map.addLayer(yearlyComposite, Visprams, 'Optical');
+
+// Define download options
+var downloadOptions = {
+  scale: 30,
+  crs: 'EPSG:4326',
+  region: DRC
+};
+
+// Create a video thumbnail
+var videoArgs = {
+  dimensions: 768,
+  region: DRC,
+  framesPerSecond: 2,
+  crs: 'EPSG:4326',
+  max: 15000,
+};
+print(ui.Thumbnail(yearlyComposite, videoArgs));
+
+var projection = ee.Projection('EPSG:4326');
+
+batch.Download.ImageCollection.toDrive(
+  yearlyComposite,
+  'Mutanda',
+  {
+    name: '{id}',
+    crs: 'EPSG:4326',
+    maxPixels: 1e13,
+    region: DRC,
+    type: 'double',
+    scale: 30,
+    fileFormat: 'GeoTIFF',
+  }
+);
+
+// Export the video to Google Drive
+Export.video.toDrive({
+  collection: yearlyComposite.map(function(image) { return image.visualize({min: 0.0, max: 15000})}),
+  description: 'Landsat5_8_Optical_Video',
+  fileNamePrefix: 'Landsat5_8_Optical_Video',
+  framesPerSecond: 1,
+  dimensions: 768,
+  region: DRC,
+  crs: 'EPSG:4326',
+});
